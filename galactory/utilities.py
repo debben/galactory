@@ -159,7 +159,7 @@ def collected_collections(repo, namespace=None, name=None, scheme=None):
 
 
 def _collection_listing(repo, namespace=None, collection=None, scheme=None):
-    collections = collected_collections(repo, namespace, collection)
+    collections = collected_collections(repo, namespace, collection, scheme)
 
     results = []
 
@@ -195,6 +195,115 @@ def _collection_listing(repo, namespace=None, collection=None, scheme=None):
 
     return results
 
+def discover_roles(repo, user=None, name=None, scheme=None, fast_detection=True):
+    for p in repo:
+        if fast_detection:
+            # we're going to use the naming convention to eliminate candidates early,
+            # to avoid excessive additional requests for properties and stat that slow
+            # down the listing immensely as the number of collections grows.
+            try:
+                f_user, f_name, f_version = p.name.replace('.tar.gz', '').split('-')
+            except ValueError:
+                pass
+            else:
+                if not all(
+                    (
+                        not user or f_user == user,
+                        not name or f_name == name,
+                        # not version or f_version == version
+                    )
+                ):
+                    continue
+        info = p.stat()
+        if info.is_dir:
+            continue
+
+        props = p.properties
+        if not props.get('role_info'):
+            continue
+
+        role_info = json.loads(props['role_info'][0])
+
+        roledata = { # todo make this conform to RoleResponse
+            'role_info': role_info,
+            'created': info.ctime.isoformat(),
+            'modified': info.mtime.isoformat(),
+            'name': props['name'][0],
+            'filename': p.name,
+            'sha256': info.sha256,
+            'size': info.size,
+            'username': props['user'][0],
+            'download_url': url_for(
+                'download.download',
+                filename=p.name,
+                _external=True,
+                _scheme=scheme,
+            ),
+            'mime_type': info.mime_type,
+            'version': props['version'][0],
+            'semver': semver.VersionInfo.parse(props['version'][0]),
+            
+        }
+
+        if all(
+            (
+                not user or roledata['username'] == user,
+                not name or roledata['name'] == name,
+            )
+        ):
+            yield roledata
+
+def collected_roles(repo, username=None, roleName=None, scheme=None):
+    roles = {}
+    for r in discover_roles(repo, user=username, name=roleName, scheme=scheme):
+        version = r['version']
+        ver = r['semver']
+        role = roles.setdefault(r['name'], {})
+        versions = role.setdefault('versions', {})
+        versions[version] = r
+        if not ver.prerelease:
+            try:
+                latest = role['latest']
+            except KeyError:
+                role['latest'] = r
+            else:
+                if ver > latest['semver']:
+                    role['latest'] = r
+    return roles
+
+def _role_listing(repo, scheme=None, username=None, roleName=None):
+    roles = collected_roles(repo, username, roleName)
+    
+    results = []
+    for _, i in roles.items():
+        latest = i['latest']
+        result = {
+            'href': url_for(request.endpoint, _external=True, _scheme=scheme, **request.view_args),
+            'name': latest['name'],
+            'username': latest['username'],
+            'created': latest['created'],
+            'modified': latest['modified'],
+            'versions_url': url_for(
+                'api.v1.versions',
+                username=latest['username'],
+                roleName=latest['name'],
+                _external=True,
+                _scheme=scheme,
+            ),
+            'latest_version': {
+                'href': url_for(
+                    'api.v1.version',
+                    username=latest['username'],
+                    roleName=latest['name'],
+                    version=latest['version'],
+                    _external=True,
+                    _scheme=scheme,
+                ),
+                "version": latest['version'],
+            }
+        }
+    
+    return roles
 
 def lcm(a, b, *more):
     z = lcm(b, *more) if more else b
